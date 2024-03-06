@@ -1,6 +1,8 @@
 # Monkube: Monitoring Kubernetes
 
-This command-line utility lets you monitor different resources in differenet namespaces with ease
+This command-line utility lets you monitor different resources in different namespaces with ease
+
+**SUGGESTION**: To make easier to work with `monkube`, make the utility an executable (e.g., `$ chmod u+x monkube`) and add it to your `$PATH`.
 
 ## Usage
 
