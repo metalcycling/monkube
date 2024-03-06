@@ -2,7 +2,7 @@
 
 This command-line utility lets you monitor different resources in different namespaces with ease
 
-**SUGGESTION**: To make easier to work with `monkube`, make the utility an executable (e.g., `$ chmod u+x monkube`) and add it to your `$PATH`.
+**SUGGESTION**: To make it easier to work with `monkube`, make the utility an executable (e.g., `$ chmod u+x monkube`) and add it to your `$PATH`.
 
 ## Usage
 
