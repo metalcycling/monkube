@@ -1,0 +1,330 @@
+#!/opt/homebrew/bin/python3
+
+"""
+Monkube: Kuberneters cluster monitoring utility
+"""
+
+# %% Modules
+
+import os
+import sys
+import json
+import yaml
+import math
+import time
+import argparse
+import subprocess
+import numpy as np
+
+from datetime import datetime
+
+# %% Timing variables
+
+times = {}
+times["etcd"] = 0.0
+times["parsing"] = time.time()
+
+# %% Functions
+
+def bash(command, print_stdout = True, print_stderr = True):
+    """
+    - Run bash commands as if they are directly typed on the shell and return response
+    - Print 'stdout' if 'stdout = True'
+    """
+    proc = subprocess.Popen(command, shell = True, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+    stdout_response = []
+    stderr_response = []
+
+    # Parse stdout
+    for encoded in proc.stdout.readlines():
+        decoded = encoded.decode("utf-8") 
+
+        if decoded[-1] == '\n':
+            stdout_response.append(decoded[:-1])
+        else:
+            stdout_response.append(decoded)
+
+    if print_stdout:
+        for line in stdout_response:
+            print(line)
+
+    # Parse stderr
+    for encoded in proc.stderr.readlines():
+        decoded = encoded.decode("utf-8") 
+
+        if decoded[-1] == '\n':
+            stderr_response.append(decoded[:-1])
+        else:
+            stderr_response.append(decoded)
+
+    if print_stderr:
+        for line in stderr_response:
+            print(line)
+
+    return stdout_response + stderr_response
+
+def get_memory_from_string(string):
+    """
+    Parse string with memory information. Returns the value in Gi.
+    """
+    if string[-2:] == "mi":
+        return float(string[:-2]) / 1.0e12
+
+    if string[-1:] == "m":
+        return float(string[:-1]) / 1.0e12
+
+    if string[-2:] == "Ki":
+        return float(string[:-2]) / 1.0e6
+
+    elif string[-1:] == "K":
+        return float(string[:-1]) / 1.0e6
+
+    elif string[-2:] == "Mi":
+        return float(string[:-2]) / 1.0e3
+
+    elif string[-1:] == "M":
+        return float(string[:-1]) / 1.0e3
+
+    elif string[-2:] == "Gi":
+        return float(string[:-2]) / 1.0e0
+
+    elif string[-1:] == "G":
+        return float(string[:-1]) / 1.0e0
+
+def get_cpu_from_string(string):
+    """
+    Parse string with cpu information. Returns the value in millicores.
+    """
+    if isinstance(string, int):
+        return float(string)
+    else:
+        if string[-1] == "m":
+            return float(string[:-1])
+        elif string.isnumeric():
+            return float(string) * 1000.0
+        else:
+            print("CPU value '%s' is not understood" % (string))
+            quit()
+
+def get_gpu_from_string(string):
+    """
+    Parse string with gpu information. Returns the value in number of fractional GPUs.
+    """
+    return float(string)
+
+def get_dashed_header(header_string, num_header_characters = 80):
+    """
+    Returns a centered string with dashes on both sides separated by spaces
+    """
+    if header_string == None:
+        output_string = "-" * num_header_characters
+
+    elif len(header_string) > num_header_characters:
+        output_string = header_string[:num_header_characters]
+
+    else:
+        num_dashes = num_header_characters - (len(header_string) + 2)
+        num_left_dashes = math.ceil(num_dashes / 2)
+        num_right_dashes = num_dashes - num_left_dashes
+        output_string = "%s %s %s\n" % ("-" * num_left_dashes, header_string, "-" * num_right_dashes)
+
+    return output_string
+
+# %% Main function
+
+def main(args):
+    """
+    Main program to monitor resources
+    """
+
+    # %% Get resources from etcd
+
+    if args.resources:
+        for resource in args.resources:
+            print(get_dashed_header(resource.upper() + ":"))
+
+            for namespace in args.namespaces:
+                command = "kubectl -n %s get %s" % (namespace, resource)
+
+                if args.sort:
+                    command += " --sort-by=.metadata.creationTimestamp"
+
+                if args.labels:
+                    command += " --selector=%s" % ("".join(args.labels))
+
+                t_start = time.time()
+                response = bash(command, print_stdout = False, print_stderr = False)
+                t_end = time.time()
+                times["etcd"] += t_end - t_start
+
+                print("NAMESPACE: '%s'" % (namespace))
+
+                if len(response) > 1 and args.sort:
+                    response = [response[0]] + response[1:][::-1][:args.num_lines]
+                elif args.num_lines:
+                    response = response[:args.num_lines + 1]
+
+                print("\n".join(response))
+                print()
+
+    # %% Get nodes
+
+    if args.nodes:
+        t_start = time.time()
+        response = bash("kubectl get nodes -o json", print_stdout = False, print_stderr = False)
+        t_end = time.time()
+        times["etcd"] += t_end - t_start
+
+        nodes = json.loads("\n".join(response))["items"]
+
+        if args.sort:
+            nodes_idx = np.argsort([datetime.strptime(node["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ") for node in nodes])[::-1]
+        else:
+            nodes_idx = np.arange(len(nodes))
+
+        stdout = []
+
+        if args.nodes == "reduced":
+            num_nodes = 0
+            name_width = max([len(nodes[idx]["metadata"]["name"]) for idx in nodes_idx])
+            age_width = len("%3d:%02d:%02d" % (0, 0, 0))
+
+            stdout.append("%-*s  %-*s" % (name_width, "NAME", age_width, "AGE"))
+
+            for idx in nodes_idx:
+                node = nodes[idx]
+                name = node["metadata"]["name"]
+                creation_timestamp = datetime.strptime(node["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ")
+                lapsed_seconds = int(abs((creation_timestamp - datetime.utcnow()).total_seconds()))
+                age_hours = lapsed_seconds // 3600
+                age_minutes = (lapsed_seconds % 3600) // 60
+                age_seconds = (lapsed_seconds % 3600) % 60
+                age = "%3d:%02d:%02d" % (age_hours, age_minutes, age_seconds)
+
+                stdout.append("")
+                stdout[-1] += "%-*s  %-*s" % (name_width, name, age_width, age)
+                num_nodes += 1
+
+                if args.num_nodes:
+                    if num_nodes == int(args.num_nodes):
+                        break
+
+            stdout.append("")
+
+        else:
+            t_start = time.time()
+            response = bash("kubectl get pods -o json --all-namespaces", print_stdout = False, print_stderr = False)
+            t_end = time.time()
+            times["etcd"] += t_end - t_start
+
+            pods = json.loads("\n".join(response))["items"]
+
+            for node in nodes:
+                capacity = node["status"]["allocatable"]
+                node["utilization"] = { "avail": {}, "alloc": {} }
+
+                node["utilization"]["avail"]["cpu"] = get_cpu_from_string(capacity["cpu"]) if "cpu" in capacity else 0.0
+                node["utilization"]["avail"]["gpu"] = get_gpu_from_string(capacity["nvidia.com/gpu"]) if "nvidia.com/gpu" in capacity else 0.0
+                node["utilization"]["avail"]["mem"] = get_memory_from_string(capacity["memory"]) if "memory" in capacity else 0.0
+
+                node["utilization"]["alloc"]["cpu"] = 0.0
+                node["utilization"]["alloc"]["gpu"] = 0.0
+                node["utilization"]["alloc"]["mem"] = 0.0
+
+            name_to_node = {}
+
+            for idx, node in enumerate(nodes):
+                name_to_node[node["metadata"]["name"]] = idx
+
+            for pod in pods:
+                cpu_total = 0.0
+                gpu_total = 0.0
+                mem_total = 0.0
+
+                for container in pod["spec"]["containers"]:
+                    request = container["resources"]["requests"] if "requests" in container["resources"] else {}
+
+                    cpu_total += get_cpu_from_string(request["cpu"]) if "cpu" in request else 0.0
+                    gpu_total += get_gpu_from_string(request["nvidia.com/gpu"]) if "gpu" in request else 0.0
+                    mem_total += get_memory_from_string(request["memory"]) if "memory" in request else 0.0
+
+                if "phase" in pod["status"] and pod["status"]["phase"] == "Running":
+                    node_name = pod["spec"]["nodeName"]
+
+                    if node_name in name_to_node:
+                        idx = name_to_node[node_name]
+                        nodes[idx]["utilization"]["alloc"]["cpu"] += cpu_total
+                        nodes[idx]["utilization"]["alloc"]["gpu"] += gpu_total
+                        nodes[idx]["utilization"]["alloc"]["mem"] += mem_total
+            
+            num_nodes = 0
+
+            for idx in nodes_idx:
+                node = nodes[idx]
+                name = node["metadata"]["name"]
+
+                cpu_avail = node["utilization"]["avail"]["cpu"]
+                gpu_avail = node["utilization"]["avail"]["gpu"]
+                mem_avail = node["utilization"]["avail"]["mem"]
+
+                cpu_alloc = node["utilization"]["alloc"]["cpu"]
+                gpu_alloc = node["utilization"]["alloc"]["gpu"]
+                mem_alloc = node["utilization"]["alloc"]["mem"]
+
+                stdout.append("")
+                stdout[-1] += "NAME: %s\n" % (name)
+                stdout[-1] += "    cpu: %8.2f / %8.2f (%6.2f%%)\n" % (cpu_alloc, cpu_avail, cpu_alloc / cpu_avail * 100.0 if cpu_avail > 0.0 else 0.0)
+                stdout[-1] += "    gpu: %8.2f / %8.2f (%6.2f%%)\n" % (gpu_alloc, gpu_avail, gpu_alloc / gpu_avail * 100.0 if gpu_avail > 0.0 else 0.0)
+                stdout[-1] += "    mem: %8.2f / %8.2f (%6.2f%%)\n" % (mem_alloc, mem_avail, mem_alloc / mem_avail * 100.0 if mem_avail > 0.0 else 0.0)
+                num_nodes += 1
+
+                if args.num_nodes:
+                    if num_nodes == int(args.num_nodes):
+                        break
+
+        print(get_dashed_header("CLUSTER NODES:"))
+        print("\n".join(stdout))
+
+    print(get_dashed_header(None))
+
+    times["parsing"] = (time.time() - times["parsing"]) - times["etcd"]
+
+    print()
+    print("   ETCD time: %0.2f s" % (times["etcd"]))
+    print("Parsing time: %0.2f s" % (times["parsing"]))
+    print()
+
+# %% Main program
+
+if __name__ == "__main__":
+    """
+    Monkube: This utility monitors a list of Kubernetes resources for a list of specified namespaces
+    """
+
+    parser = argparse.ArgumentParser(prog = "Monkube", description = "Monitoring of kubernetes resources")
+    parser.add_argument("-r", "--resources", default = None, help = "Comma-separated list of resources to be monitored")
+    parser.add_argument("-n", "--namespaces", default = "", help = "Comma-separated list of namespaces to be monitored")
+    parser.add_argument("-l", "--num_lines", default = None, type = int, help = "Number of lines to print for each resource")
+    parser.add_argument("-s", "--sort", action = "store_true", help = "Sort resources starting with the most recently used")
+    parser.add_argument("-t", "--labels", default = "", help = "Get subset of resources matching the specified comma-separated list of labels (e.g., \"--labels key-1=value-1,key-2=value-2\"")
+    parser.add_argument("-nd", "--nodes", default = None, choices = ["full", "reduced"], help = "Show allocation and utilization of nodes")
+    parser.add_argument("-ln", "--num_nodes", default = None, help = "Show data for the first 'num_nodes'")
+
+    t_start = time.time()
+    current_namespace = bash("kc config get-contexts `kc config current-context` --no-headers | awk '{ print $5 }'", print_stdout = False)[0]
+    if current_namespace == "":
+        current_namespace = "default"
+    t_end = time.time()
+    times["etcd"] += t_end - t_start
+
+    args = parser.parse_args()
+    args.resources = args.resources.split(",") if args.resources else None
+    args.namespaces = args.namespaces.split(",") if args.namespaces else [current_namespace]
+    args.labels = args.labels.split(",")
+
+    if args.resources is None and args.nodes is None:
+        parser.print_help()
+    else:
+        main(args)
+
+# %% End of program
