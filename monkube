@@ -311,7 +311,7 @@ if __name__ == "__main__":
     parser.add_argument("-ln", "--num_nodes", default = None, help = "Show data for the first 'num_nodes'")
 
     t_start = time.time()
-    current_namespace = bash("kc config get-contexts `kc config current-context` --no-headers | awk '{ print $5 }'", print_stdout = False)[0]
+    current_namespace = bash("kubectl config get-contexts `kubectl config current-context` --no-headers | awk '{ print $5 }'", print_stdout = False)[0]
     if current_namespace == "":
         current_namespace = "default"
     t_end = time.time()
