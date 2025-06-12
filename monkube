@@ -91,6 +91,12 @@ def get_memory_from_string(string):
     elif string[-1:] == "G":
         return float(string[:-1]) / 1.0e0
 
+    elif string[-2:] == "Ti":
+        return float(string[:-2]) / 1.0e-3
+
+    elif string[-1:] == "T":
+        return float(string[:-1]) / 1.0e-3
+
 def get_cpu_from_string(string):
     """
     Parse string with cpu information. Returns the value in millicores.
