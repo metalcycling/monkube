@@ -224,8 +224,14 @@ def main(args):
                 node["utilization"] = { "avail": {}, "alloc": {} }
 
                 node["utilization"]["avail"]["cpu"] = get_cpu_from_string(capacity["cpu"]) if "cpu" in capacity else 0.0
-                node["utilization"]["avail"]["gpu"] = get_gpu_from_string(capacity["nvidia.com/gpu"]) if "nvidia.com/gpu" in capacity else 0.0
                 node["utilization"]["avail"]["mem"] = get_memory_from_string(capacity["memory"]) if "memory" in capacity else 0.0
+
+                if "nvidia.com/gpu" in capacity:
+                    node["utilization"]["avail"]["gpu"] = get_gpu_from_string(capacity["nvidia.com/gpu"])
+                elif "amd.com/gpu" in capacity:
+                    node["utilization"]["avail"]["gpu"] = get_gpu_from_string(capacity["amd.com/gpu"])
+                else:
+                    node["utilization"]["avail"]["gpu"] = 0.0
 
                 node["utilization"]["alloc"]["cpu"] = 0.0
                 node["utilization"]["alloc"]["gpu"] = 0.0
@@ -245,8 +251,14 @@ def main(args):
                     request = container["resources"]["requests"] if "requests" in container["resources"] else {}
 
                     cpu_total += get_cpu_from_string(request["cpu"]) if "cpu" in request else 0.0
-                    gpu_total += get_gpu_from_string(request["nvidia.com/gpu"]) if "gpu" in request else 0.0
                     mem_total += get_memory_from_string(request["memory"]) if "memory" in request else 0.0
+
+                    if "nvidia.com/gpu" in request:
+                        gpu_total += get_gpu_from_string(capacity["nvidia.com/gpu"])
+                    elif "amd.com/gpu" in request:
+                        gpu_total += get_gpu_from_string(capacity["amd.com/gpu"])
+                    else:
+                        gpu_total += 0.0
 
                 if "phase" in pod["status"] and pod["status"]["phase"] == "Running":
                     node_name = pod["spec"]["nodeName"]
@@ -273,9 +285,9 @@ def main(args):
 
                 stdout.append("")
                 stdout[-1] += "NAME: %s\n" % (name)
-                stdout[-1] += "    cpu: %8.2f / %8.2f (%6.2f%%)\n" % (cpu_alloc, cpu_avail, cpu_alloc / cpu_avail * 100.0 if cpu_avail > 0.0 else 0.0)
-                stdout[-1] += "    gpu: %8.2f / %8.2f (%6.2f%%)\n" % (gpu_alloc, gpu_avail, gpu_alloc / gpu_avail * 100.0 if gpu_avail > 0.0 else 0.0)
-                stdout[-1] += "    mem: %8.2f / %8.2f (%6.2f%%)\n" % (mem_alloc, mem_avail, mem_alloc / mem_avail * 100.0 if mem_avail > 0.0 else 0.0)
+                stdout[-1] += "    cpu: %9.2f / %9.2f (%6.2f%%)\n" % (cpu_alloc, cpu_avail, cpu_alloc / cpu_avail * 100.0 if cpu_avail > 0.0 else 0.0)
+                stdout[-1] += "    gpu: %9.2f / %9.2f (%6.2f%%)\n" % (gpu_alloc, gpu_avail, gpu_alloc / gpu_avail * 100.0 if gpu_avail > 0.0 else 0.0)
+                stdout[-1] += "    mem: %9.2f / %9.2f (%6.2f%%)\n" % (mem_alloc, mem_avail, mem_alloc / mem_avail * 100.0 if mem_avail > 0.0 else 0.0)
                 num_nodes += 1
 
                 if args.num_nodes:
