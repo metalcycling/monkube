@@ -270,9 +270,9 @@ def main(args):
                     mem_total += get_memory_from_string(request["memory"]) if "memory" in request else 0.0
 
                     if "nvidia.com/gpu" in request:
-                        gpu_total += get_gpu_from_string(capacity["nvidia.com/gpu"])
+                        gpu_total += get_gpu_from_string(request["nvidia.com/gpu"])
                     elif "amd.com/gpu" in request:
-                        gpu_total += get_gpu_from_string(capacity["amd.com/gpu"])
+                        gpu_total += get_gpu_from_string(request["amd.com/gpu"])
                     else:
                         gpu_total += 0.0
 
@@ -284,7 +284,7 @@ def main(args):
                         nodes[idx]["utilization"]["alloc"]["cpu"] += cpu_total
                         nodes[idx]["utilization"]["alloc"]["gpu"] += gpu_total
                         nodes[idx]["utilization"]["alloc"]["mem"] += mem_total
-            
+
             num_nodes = 0
 
             for idx in nodes_idx:
