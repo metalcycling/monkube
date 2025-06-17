@@ -156,7 +156,17 @@ def main(args):
                     command += " --sort-by=.metadata.creationTimestamp"
 
                 if args.labels:
-                    command += " --selector=%s" % ("".join(args.labels))
+                    command += " --selector='"
+
+                    for idx, label in enumerate(args.labels):
+                        key, value = label.split("=")
+
+                        command += "%s in (%s)" % (key, ", ".join(value.split("|")))
+
+                        if idx < len(args.labels) - 1:
+                            command += ", "
+
+                    command += "'"
 
                 t_start = time.time()
                 response = bash(command, print_stdout = False, print_stderr = False)
@@ -324,7 +334,7 @@ if __name__ == "__main__":
     parser.add_argument("-n", "--namespaces", default = "", help = "Comma-separated list of namespaces to be monitored")
     parser.add_argument("-l", "--num_lines", default = None, type = int, help = "Number of lines to print for each resource")
     parser.add_argument("-s", "--sort", action = "store_true", help = "Sort resources starting with the most recently used")
-    parser.add_argument("-t", "--labels", default = "", help = "Get subset of resources matching the specified comma-separated list of labels (e.g., \"--labels key-1=value-1,key-2=value-2\"")
+    parser.add_argument("-t", "--labels", default = None, help = "Get subset of resources matching the specified comma-separated list of labels. Use '|' to specify multiple matches for a given key. EXAMPLE: \"--labels key-1=value-1,key-2='value-2|value-3'\"")
     parser.add_argument("-nd", "--nodes", default = None, choices = ["full", "reduced"], help = "Show allocation and utilization of nodes")
     parser.add_argument("-ln", "--num_nodes", default = None, help = "Show data for the first 'num_nodes'")
 
@@ -338,7 +348,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args.resources = args.resources.split(",") if args.resources else None
     args.namespaces = args.namespaces.split(",") if args.namespaces else [current_namespace]
-    args.labels = args.labels.split(",")
+
+    if args.labels:
+        args.labels = args.labels.split(",")
 
     if args.resources is None and args.nodes is None:
         parser.print_help()
