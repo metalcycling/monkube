@@ -168,6 +168,9 @@ def main(args):
 
                     command += "'"
 
+                if args.status and "pod" in resource:
+                    command += " --field-selector=status.phase==%s" % (args.status)
+
                 t_start = time.time()
                 response = bash(command, print_stdout = False, print_stderr = False)
                 t_end = time.time()
@@ -337,6 +340,7 @@ if __name__ == "__main__":
     parser.add_argument("-t", "--labels", default = None, help = "Get subset of resources matching the specified comma-separated list of labels. Use '|' to specify multiple matches for a given key. EXAMPLE: \"--labels key-1=value-1,key-2='value-2|value-3'\"")
     parser.add_argument("-nd", "--nodes", default = None, choices = ["full", "reduced"], help = "Show allocation and utilization of nodes")
     parser.add_argument("-ln", "--num_nodes", default = None, help = "Show data for the first 'num_nodes'")
+    parser.add_argument("-st", "--status", default = None, help = "Get pods matching 'status'")
 
     t_start = time.time()
     current_namespace = bash("kubectl config get-contexts `kubectl config current-context` --no-headers | awk '{ print $5 }'", print_stdout = False)[0]
