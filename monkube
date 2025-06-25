@@ -68,34 +68,34 @@ def get_memory_from_string(string):
     Parse string with memory information. Returns the value in Gi.
     """
     if string[-2:] == "mi":
-        return float(string[:-2]) / 1.0e12
+        return float(string[:-2]) / (1024 ** 3)
 
     if string[-1:] == "m":
-        return float(string[:-1]) / 1.0e12
+        return float(string[:-1]) / (1024 ** 3)
 
     if string[-2:] == "Ki":
-        return float(string[:-2]) / 1.0e6
+        return float(string[:-2]) / (1024 ** 2)
 
     elif string[-1:] == "K":
-        return float(string[:-1]) / 1.0e6
+        return float(string[:-1]) / (1024 ** 2)
 
     elif string[-2:] == "Mi":
-        return float(string[:-2]) / 1.0e3
+        return float(string[:-2]) / (1024 ** 1)
 
     elif string[-1:] == "M":
-        return float(string[:-1]) / 1.0e3
+        return float(string[:-1]) / (1024 ** 1)
 
     elif string[-2:] == "Gi":
-        return float(string[:-2]) / 1.0e0
+        return float(string[:-2]) / (1024 ** 0)
 
     elif string[-1:] == "G":
-        return float(string[:-1]) / 1.0e0
+        return float(string[:-1]) / (1024 ** 0)
 
     elif string[-2:] == "Ti":
-        return float(string[:-2]) / 1.0e-3
+        return float(string[:-2]) / (1024 ** -1)
 
     elif string[-1:] == "T":
-        return float(string[:-1]) / 1.0e-3
+        return float(string[:-1]) / (1024 ** -1)
 
 def get_cpu_from_string(string):
     """
