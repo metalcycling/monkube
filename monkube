@@ -316,6 +316,79 @@ def main(args):
         print(get_dashed_header("CLUSTER NODES:"))
         print("\n".join(stdout))
 
+    if args.target_nodes:
+        t_start = time.time()
+        response = bash("kubectl describe nodes --selector='kubernetes.io/hostname in (%s)'" % (", ".join(args.target_nodes)), print_stdout = False, print_stderr = False)
+        t_end = time.time()
+        times["etcd"] += t_end - t_start
+
+        stdout = []
+
+        cpu_avail, cpu_alloc = None, None
+        gpu_avail, gpu_alloc = None, None
+        mem_avail, mem_alloc = None, None
+
+        node_id = 0
+
+        for idx, line in enumerate(response):
+            if "Allocatable:" in line:
+                jdx = 1
+
+                while response[idx + jdx][:2] == "  ":
+                    if "cpu" in response[idx + jdx]:
+                        cpu_avail = get_cpu_from_string(response[idx + jdx].split()[1])
+
+                    if "memory" in response[idx + jdx]:
+                        mem_avail = get_memory_from_string(response[idx + jdx].split()[1])
+
+                    if "nvidia.com/gpu" in response[idx + jdx]:
+                        gpu_avail = get_gpu_from_string(response[idx + jdx].split()[1])
+
+                    if "amd.com/gpu" in response[idx + jdx]:
+                        gpu_avail = get_gpu_from_string(response[idx + jdx].split()[1])
+
+                    jdx += 1
+
+            if "Allocated resources:" in line:
+                jdx = 1
+
+                while response[idx + jdx][:2] == "  ":
+                    if "cpu" in response[idx + jdx]:
+                        cpu_alloc = get_cpu_from_string(response[idx + jdx].split()[1])
+
+                    if "memory" in response[idx + jdx]:
+                        mem_alloc = get_memory_from_string(response[idx + jdx].split()[1])
+
+                    if "nvidia.com/gpu" in response[idx + jdx]:
+                        gpu_alloc = get_gpu_from_string(response[idx + jdx].split()[1])
+
+                    if "amd.com/gpu" in response[idx + jdx]:
+                        gpu_alloc = get_gpu_from_string(response[idx + jdx].split()[1])
+
+                    jdx += 1
+
+            if cpu_avail and cpu_alloc and mem_avail and mem_alloc:
+                gpu_avail = gpu_avail if gpu_avail else 0.0
+                gpu_alloc = gpu_alloc if gpu_alloc else 0.0
+
+                name = args.target_nodes[node_id]
+
+                stdout.append("")
+                stdout[-1] += "NAME: %s\n" % (name)
+
+                stdout[-1] += "    cpu: %9.2f / %9.2f (%6.2f%%)\n" % (cpu_alloc, cpu_avail, cpu_alloc / cpu_avail * 100.0 if cpu_avail > 0.0 else 0.0)
+                stdout[-1] += "    gpu: %9.2f / %9.2f (%6.2f%%)\n" % (gpu_alloc, gpu_avail, gpu_alloc / gpu_avail * 100.0 if gpu_avail > 0.0 else 0.0)
+                stdout[-1] += "    mem: %9.2f / %9.2f (%6.2f%%)\n" % (mem_alloc, mem_avail, mem_alloc / mem_avail * 100.0 if mem_avail > 0.0 else 0.0)
+
+                node_id += 1
+
+                cpu_avail, cpu_alloc = None, None
+                gpu_avail, gpu_alloc = None, None
+                mem_avail, mem_alloc = None, None
+
+        print(get_dashed_header("CLUSTER NODES:"))
+        print("\n".join(stdout))
+
     print(get_dashed_header(None))
 
     times["parsing"] = (time.time() - times["parsing"]) - times["etcd"]
@@ -340,6 +413,7 @@ if __name__ == "__main__":
     parser.add_argument("-t", "--labels", default = None, help = "Get subset of resources matching the specified comma-separated list of labels. Use '|' to specify multiple matches for a given key. EXAMPLE: \"--labels key-1=value-1,key-2='value-2|value-3'\"")
     parser.add_argument("-nd", "--nodes", default = None, choices = ["full", "reduced"], help = "Show allocation and utilization of nodes")
     parser.add_argument("-ln", "--num_nodes", default = None, help = "Show data for the first 'num_nodes'")
+    parser.add_argument("-tn", "--target_nodes", default = None, help = "Comma-separated list of specific nodes to query")
     parser.add_argument("-st", "--status", default = None, help = "Get pods matching 'status'")
 
     t_start = time.time()
@@ -352,11 +426,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args.resources = args.resources.split(",") if args.resources else None
     args.namespaces = args.namespaces.split(",") if args.namespaces else [current_namespace]
+    args.labels = args.labels.split(",") if args.labels else None
+    args.target_nodes = args.target_nodes.split(",") if args.target_nodes else None
 
-    if args.labels:
-        args.labels = args.labels.split(",")
-
-    if args.resources is None and args.nodes is None:
+    if args.resources is None and args.nodes is None and args.target_nodes is None:
         parser.print_help()
     else:
         main(args)
