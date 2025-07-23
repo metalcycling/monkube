@@ -67,13 +67,11 @@ def get_memory_from_string(string):
     """
     Parse string with memory information. Returns the value in Gi.
     """
-    if string[-2:] == "mi":
-        return float(string[:-2]) / (1024 ** 3)
 
-    if string[-1:] == "m":
-        return float(string[:-1]) / (1024 ** 3)
+    if string.isdigit():
+        return float(string) / (1024 ** 3)
 
-    if string[-2:] == "Ki":
+    elif string[-2:] == "Ki":
         return float(string[:-2]) / (1024 ** 2)
 
     elif string[-1:] == "K":
