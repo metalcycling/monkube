@@ -10,7 +10,7 @@ Check the `help` option of Monkube to find the list of options
 
 ```bash
 $ monkube --help
-usage: Monkube [-h] [-r RESOURCES] [-n NAMESPACES] [-l NUM_LINES] [-s] [-t LABELS] [-nd {full,reduced}] [-ln NUM_NODES]
+usage: Monkube [-h] [-r RESOURCES] [-n NAMESPACES] [-l NUM_LINES] [-s] [-t LABELS] [-nd {full,reduced}] [-ln NUM_NODES] [-tn TARGET_NODES] [-st STATUS]
 
 Monitoring of kubernetes resources
 
@@ -24,11 +24,15 @@ options:
                         Number of lines to print for each resource
   -s, --sort            Sort resources starting with the most recently used
   -t LABELS, --labels LABELS
-                        Get subset of resources matching the specified comma-separated list of labels (e.g., "--labels key-1=value-1,key-2=value-2"
+                        Get subset of resources matching the specified comma-separated list of labels. Use '|' to specify multiple matches for a given key. EXAMPLE: "--labels key-1=value-1,key-2='value-2|value-3'"
   -nd {full,reduced}, --nodes {full,reduced}
                         Show allocation and utilization of nodes
   -ln NUM_NODES, --num_nodes NUM_NODES
                         Show data for the first 'num_nodes'
+  -tn TARGET_NODES, --target_nodes TARGET_NODES
+                        Comma-separated list of specific nodes to query
+  -st STATUS, --status STATUS
+                        Get pods matching 'status'
 ```
 
 ## Example
