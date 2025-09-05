@@ -277,7 +277,7 @@ def main(args):
                     else:
                         gpu_total += 0.0
 
-                if "phase" in pod["status"] and pod["status"]["phase"] == "Running":
+                if "phase" in pod["status"] and pod["status"]["phase"] in ["Running", "Pending"]:
                     node_name = pod["spec"]["nodeName"]
 
                     if node_name in name_to_node:
