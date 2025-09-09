@@ -278,6 +278,9 @@ def main(args):
                         gpu_total += 0.0
 
                 if "phase" in pod["status"] and pod["status"]["phase"] in ["Running", "Pending"]:
+                    if "nodeName" not in pod["spec"]:
+                        continue
+
                     node_name = pod["spec"]["nodeName"]
 
                     if node_name in name_to_node:
