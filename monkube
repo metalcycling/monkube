@@ -332,6 +332,9 @@ def main(args):
         node_id = 0
 
         for idx, line in enumerate(response):
+            if "Name:" in line:
+                name = line.split()[-1]
+
             if "Allocatable:" in line:
                 jdx = 1
 
@@ -371,8 +374,6 @@ def main(args):
             if cpu_avail and cpu_alloc and mem_avail and mem_alloc:
                 gpu_avail = gpu_avail if gpu_avail else 0.0
                 gpu_alloc = gpu_alloc if gpu_alloc else 0.0
-
-                name = args.target_nodes[node_id]
 
                 stdout.append("")
                 stdout[-1] += "NAME: %s\n" % (name)
