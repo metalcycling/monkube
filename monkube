@@ -18,6 +18,32 @@ import numpy as np
 
 from datetime import datetime, timezone
 
+# %% ANSI color codes
+
+BOLD    = "\033[1m"
+DIM     = "\033[2m"
+RED     = "\033[31m"
+GREEN   = "\033[32m"
+YELLOW  = "\033[33m"
+BLUE    = "\033[34m"
+MAGENTA = "\033[35m"
+CYAN    = "\033[36m"
+WHITE   = "\033[37m"
+RESET   = "\033[0m"
+
+def colorize_percentage(value):
+    """
+    Return a color code based on utilization percentage thresholds
+    """
+    if value < 50.0:
+        return GREEN
+
+    elif value < 80.0:
+        return YELLOW
+
+    else:
+        return RED
+
 # %% Timing variables
 
 times = {}
@@ -67,7 +93,6 @@ def get_memory_from_string(string):
     """
     Parse string with memory information. Returns the value in Gi.
     """
-
     if string.isdigit():
         return float(string) / (1024 ** 3)
 
@@ -101,13 +126,16 @@ def get_cpu_from_string(string):
     """
     if isinstance(string, int):
         return float(string)
+
     else:
         if string[-1] == "m":
             return float(string[:-1])
+
         elif string.isnumeric():
             return float(string) * 1000.0
+
         else:
-            print("CPU value '%s' is not understood" % (string))
+            print("%sCPU value '%s' is not understood%s" % (RED, string, RESET))
             quit()
 
 def get_gpu_from_string(string):
@@ -116,21 +144,91 @@ def get_gpu_from_string(string):
     """
     return float(string)
 
+STATUS_COLORS = {
+    "Running":            GREEN,
+    "Succeeded":          GREEN,
+    "Completed":          GREEN,
+    "Active":             GREEN,
+    "Bound":              GREEN,
+    "Pending":            YELLOW,
+    "ContainerCreating":  YELLOW,
+    "Terminating":        YELLOW,
+    "Failed":             RED,
+    "CrashLoopBackOff":   RED,
+    "Error":              RED,
+    "ImagePullBackOff":   RED,
+    "ErrImagePull":       RED,
+    "OOMKilled":          RED,
+    "Evicted":            RED,
+}
+
+def colorize_columns(lines):
+    """
+    Apply per-column colors to tabular kubectl output
+    """
+    if not lines or not lines[0]:
+        return lines
+
+    header = lines[0]
+    col_starts = []
+
+    if not header[0].isspace():
+        col_starts.append(0)
+
+    for i in range(1, len(header)):
+        if header[i] != ' ' and header[i - 1] == ' ':
+            col_starts.append(i)
+
+    if not col_starts:
+        return lines
+
+    col_names = []
+
+    for c_idx, start in enumerate(col_starts):
+        end = col_starts[c_idx + 1] if c_idx + 1 < len(col_starts) else len(header)
+        col_names.append(header[start:end].strip())
+
+    status_col = col_names.index("STATUS") if "STATUS" in col_names else -1
+
+    colored_lines = [BOLD + header + RESET]
+
+    for line in lines[1:]:
+        colored_line = ""
+
+        for c_idx, start in enumerate(col_starts):
+            if start >= len(line):
+                break
+
+            end = col_starts[c_idx + 1] if c_idx + 1 < len(col_starts) else len(line)
+            value = line[start:end]
+
+            if c_idx == status_col:
+                color = STATUS_COLORS.get(value.strip(), WHITE)
+            else:
+                color = WHITE if c_idx % 2 == 0 else CYAN
+
+            colored_line += color + value
+
+        colored_line += RESET
+        colored_lines.append(colored_line)
+
+    return colored_lines
+
 def get_dashed_header(header_string, num_header_characters = 80):
     """
     Returns a centered string with dashes on both sides separated by spaces
     """
     if header_string == None:
-        output_string = "-" * num_header_characters
+        output_string = DIM + "-" * num_header_characters + RESET
 
     elif len(header_string) > num_header_characters:
-        output_string = header_string[:num_header_characters]
+        output_string = BOLD + CYAN + header_string[:num_header_characters] + RESET
 
     else:
         num_dashes = num_header_characters - (len(header_string) + 2)
         num_left_dashes = math.ceil(num_dashes / 2)
         num_right_dashes = num_dashes - num_left_dashes
-        output_string = "%s %s %s\n" % ("-" * num_left_dashes, header_string, "-" * num_right_dashes)
+        output_string = "%s%s%s %s%s%s %s%s%s\n" % (DIM, "-" * num_left_dashes, RESET, BOLD + CYAN, header_string, RESET, DIM, "-" * num_right_dashes, RESET)
 
     return output_string
 
@@ -174,14 +272,14 @@ def main(args):
                 t_end = time.time()
                 times["etcd"] += t_end - t_start
 
-                print("NAMESPACE: '%s'" % (namespace))
+                print("%s%sNAMESPACE: '%s'%s" % (BOLD, BLUE, namespace, RESET))
 
                 if len(response) > 1 and args.sort:
                     response = [response[0]] + response[1:][::-1][:args.num_lines]
                 elif args.num_lines:
                     response = response[:args.num_lines + 1]
 
-                print("\n".join(response))
+                print("\n".join(colorize_columns(response)))
                 print()
 
     # %% Get nodes
@@ -206,7 +304,7 @@ def main(args):
             name_width = max([len(nodes[idx]["metadata"]["name"]) for idx in nodes_idx])
             age_width = len("%3d:%02d:%02d" % (0, 0, 0))
 
-            stdout.append("%-*s  %-*s" % (name_width, "NAME", age_width, "AGE"))
+            stdout.append("%s%s%-*s  %-*s%s" % (BOLD, CYAN, name_width, "NAME", age_width, "AGE", RESET))
 
             for idx in nodes_idx:
                 node = nodes[idx]
@@ -313,11 +411,15 @@ def main(args):
                 gpu_alloc = node["utilization"]["alloc"]["gpu"]
                 mem_alloc = node["utilization"]["alloc"]["mem"]
 
+                cpu_percent = cpu_alloc / cpu_avail * 100.0 if cpu_avail > 0.0 else 0.0
+                gpu_percent = gpu_alloc / gpu_avail * 100.0 if gpu_avail > 0.0 else 0.0
+                mem_percent = mem_alloc / mem_avail * 100.0 if mem_avail > 0.0 else 0.0
+
                 stdout.append("")
-                stdout[-1] += "NAME: %s\n" % (name)
-                stdout[-1] += "    cpu: %9.2f / %9.2f (%6.2f%%)\n" % (cpu_alloc, cpu_avail, cpu_alloc / cpu_avail * 100.0 if cpu_avail > 0.0 else 0.0)
-                stdout[-1] += "    gpu: %9.2f / %9.2f (%6.2f%%)\n" % (gpu_alloc, gpu_avail, gpu_alloc / gpu_avail * 100.0 if gpu_avail > 0.0 else 0.0)
-                stdout[-1] += "    mem: %9.2f / %9.2f (%6.2f%%)\n" % (mem_alloc, mem_avail, mem_alloc / mem_avail * 100.0 if mem_avail > 0.0 else 0.0)
+                stdout[-1] += "%s%sNAME: %s%s\n" % (BOLD, WHITE, name, RESET)
+                stdout[-1] += "    %scpu%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, cpu_alloc, RESET, DIM, RESET, BLUE, cpu_avail, RESET, colorize_percentage(cpu_percent), cpu_percent, RESET)
+                stdout[-1] += "    %sgpu%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, gpu_alloc, RESET, DIM, RESET, BLUE, gpu_avail, RESET, colorize_percentage(gpu_percent), gpu_percent, RESET)
+                stdout[-1] += "    %smem%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, mem_alloc, RESET, DIM, RESET, BLUE, mem_avail, RESET, colorize_percentage(mem_percent), mem_percent, RESET)
                 num_nodes += 1
 
                 if args.num_nodes:
@@ -385,12 +487,16 @@ def main(args):
                 gpu_avail = gpu_avail if gpu_avail else 0.0
                 gpu_alloc = gpu_alloc if gpu_alloc else 0.0
 
-                stdout.append("")
-                stdout[-1] += "NAME: %s\n" % (name)
+                cpu_percent = cpu_alloc / cpu_avail * 100.0 if cpu_avail > 0.0 else 0.0
+                gpu_percent = gpu_alloc / gpu_avail * 100.0 if gpu_avail > 0.0 else 0.0
+                mem_percent = mem_alloc / mem_avail * 100.0 if mem_avail > 0.0 else 0.0
 
-                stdout[-1] += "    cpu: %9.2f / %9.2f (%6.2f%%)\n" % (cpu_alloc, cpu_avail, cpu_alloc / cpu_avail * 100.0 if cpu_avail > 0.0 else 0.0)
-                stdout[-1] += "    gpu: %9.2f / %9.2f (%6.2f%%)\n" % (gpu_alloc, gpu_avail, gpu_alloc / gpu_avail * 100.0 if gpu_avail > 0.0 else 0.0)
-                stdout[-1] += "    mem: %9.2f / %9.2f (%6.2f%%)\n" % (mem_alloc, mem_avail, mem_alloc / mem_avail * 100.0 if mem_avail > 0.0 else 0.0)
+                stdout.append("")
+                stdout[-1] += "%s%sNAME: %s%s\n" % (BOLD, WHITE, name, RESET)
+
+                stdout[-1] += "    %scpu%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, cpu_alloc, RESET, DIM, RESET, BLUE, cpu_avail, RESET, colorize_percentage(cpu_percent), cpu_percent, RESET)
+                stdout[-1] += "    %sgpu%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, gpu_alloc, RESET, DIM, RESET, BLUE, gpu_avail, RESET, colorize_percentage(gpu_percent), gpu_percent, RESET)
+                stdout[-1] += "    %smem%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, mem_alloc, RESET, DIM, RESET, BLUE, mem_avail, RESET, colorize_percentage(mem_percent), mem_percent, RESET)
 
                 node_id += 1
 
@@ -406,8 +512,8 @@ def main(args):
     times["parsing"] = (time.time() - times["parsing"]) - times["etcd"]
 
     print()
-    print("   ETCD time: %0.2f s" % (times["etcd"]))
-    print("Parsing time: %0.2f s" % (times["parsing"]))
+    print("%s   ETCD time: %0.2f s%s" % (DIM, times["etcd"], RESET))
+    print("%sParsing time: %0.2f s%s" % (DIM, times["parsing"], RESET))
     print()
 
 # %% Main program
