@@ -16,7 +16,7 @@ import argparse
 import subprocess
 import numpy as np
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 # %% Timing variables
 
@@ -210,9 +210,15 @@ def main(args):
 
             for idx in nodes_idx:
                 node = nodes[idx]
+
+                if args.gpu_only:
+                    capacity = node["status"]["allocatable"]
+                    if "nvidia.com/gpu" not in capacity and "amd.com/gpu" not in capacity:
+                        continue
+
                 name = node["metadata"]["name"]
                 creation_timestamp = datetime.strptime(node["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ")
-                lapsed_seconds = int(abs((creation_timestamp - datetime.utcnow()).total_seconds()))
+                lapsed_seconds = int(abs((creation_timestamp - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds()))
                 age_hours = lapsed_seconds // 3600
                 age_minutes = (lapsed_seconds % 3600) // 60
                 age_seconds = (lapsed_seconds % 3600) % 60
@@ -293,6 +299,10 @@ def main(args):
 
             for idx in nodes_idx:
                 node = nodes[idx]
+
+                if args.gpu_only and node["utilization"]["avail"]["gpu"] == 0.0:
+                    continue
+
                 name = node["metadata"]["name"]
 
                 cpu_avail = node["utilization"]["avail"]["cpu"]
@@ -417,6 +427,7 @@ if __name__ == "__main__":
     parser.add_argument("-ln", "--num_nodes", default = None, help = "Show data for the first 'num_nodes'")
     parser.add_argument("-tn", "--target_nodes", default = None, help = "Comma-separated list of specific nodes to query")
     parser.add_argument("-st", "--status", default = None, help = "Get pods matching 'status'")
+    parser.add_argument("-go", "--gpu_only", action = "store_true", help = "Only show nodes with GPUs (use with -nd)")
 
     t_start = time.time()
     current_namespace = bash("kubectl config get-contexts `kubectl config current-context` --no-headers | awk '{ print $5 }'", print_stdout = False)[0]
