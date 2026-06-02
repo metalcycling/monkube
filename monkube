@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/Users/metalcycling/.venv/research/bin/python
 
 """
 Monkube: Kuberneters cluster monitoring utility
@@ -6,17 +6,26 @@ Monkube: Kuberneters cluster monitoring utility
 
 # %% Modules
 
-import os
-import sys
-import json
-import yaml
 import math
 import time
 import argparse
 import subprocess
-import numpy as np
 
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+
+# Deserialization is the dominant CPU cost when parsing large kubectl JSON
+# payloads, so prefer 'orjson' (consumes bytes directly, ~2-4x faster than the
+# standard library) and fall back to 'json' when it is not installed.
+try:
+    import orjson
+    _json_loads = orjson.loads
+
+except ImportError:
+    import json
+
+    def _json_loads(data):
+        return json.loads(data)
 
 # %% ANSI color codes
 
@@ -52,36 +61,39 @@ times["parsing"] = time.time()
 
 # %% Functions
 
-def bash(command, print_stdout = True, print_stderr = True):
+def bash(command, print_stdout = True, print_stderr = True, as_bytes = False):
     """
     - Run bash commands as if they are directly typed on the shell and return response
-    - Print 'stdout' if 'stdout = True'
+    - Print 'stdout' if 'print_stdout = True' and 'stderr' if 'print_stderr = True'
+    - If 'as_bytes = True', return the raw 'stdout' bytes (intended to be fed straight
+      into a JSON parser); otherwise return a list of decoded 'stdout' lines followed
+      by the decoded 'stderr' lines
     """
     proc = subprocess.Popen(command, shell = True, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
-    stdout_response = []
-    stderr_response = []
+    stdout_bytes, stderr_bytes = proc.communicate()
 
-    # Parse stdout
-    for encoded in proc.stdout.readlines():
-        decoded = encoded.decode("utf-8") 
+    if as_bytes:
+        if print_stdout and stdout_bytes:
+            print(stdout_bytes.decode("utf-8"), end = "")
 
-        if decoded[-1] == '\n':
-            stdout_response.append(decoded[:-1])
-        else:
-            stdout_response.append(decoded)
+        if print_stderr and stderr_bytes:
+            print(stderr_bytes.decode("utf-8"), end = "")
+
+        return stdout_bytes
+
+    # Splitting on '\n' and dropping a single trailing empty element reproduces the
+    # previous per-line 'readlines()' behavior exactly (no trailing-newline ghost line)
+    stdout_response = stdout_bytes.decode("utf-8").split("\n")
+    if stdout_response and stdout_response[-1] == "":
+        stdout_response.pop()
+
+    stderr_response = stderr_bytes.decode("utf-8").split("\n")
+    if stderr_response and stderr_response[-1] == "":
+        stderr_response.pop()
 
     if print_stdout:
         for line in stdout_response:
             print(line)
-
-    # Parse stderr
-    for encoded in proc.stderr.readlines():
-        decoded = encoded.decode("utf-8") 
-
-        if decoded[-1] == '\n':
-            stderr_response.append(decoded[:-1])
-        else:
-            stderr_response.append(decoded)
 
     if print_stderr:
         for line in stderr_response:
@@ -232,9 +244,24 @@ def get_dashed_header(header_string, num_header_characters = 80):
 
     return output_string
 
+def fetch_pods_raw(executor):
+    """
+    Fetch every pod in the cluster, issuing one concurrent 'kubectl get pods' per
+    namespace. Splitting the single '--all-namespaces' request into parallel
+    per-namespace requests is dramatically faster because the apiserver/proxy is
+    bound by per-stream throughput rather than aggregate bandwidth. Returns a list
+    of raw JSON byte payloads (one per namespace) to be parsed by the caller.
+    """
+    namespaces_raw = bash("kubectl get namespaces -o json", print_stdout = False, print_stderr = False, as_bytes = True)
+    namespaces = [item["metadata"]["name"] for item in _json_loads(namespaces_raw)["items"]]
+
+    futures = [executor.submit(bash, "kubectl get pods -n %s -o json" % (namespace), False, False, True) for namespace in namespaces]
+
+    return [future.result() for future in futures]
+
 # %% Main function
 
-def main(args):
+def main(args, executor):
     """
     Main program to monitor resources
     """
@@ -242,10 +269,12 @@ def main(args):
     # %% Get resources from etcd
 
     if args.resources:
-        for resource in args.resources:
-            print(get_dashed_header(resource.upper() + ":"))
+        # Phase 1: build every (resource, namespace) query and fire them concurrently
+        t_start = time.time()
+        futures = {}
 
-            for namespace in args.namespaces:
+        for r_idx, resource in enumerate(args.resources):
+            for n_idx, namespace in enumerate(args.namespaces):
                 command = "kubectl -n %s get %s" % (namespace, resource)
 
                 if args.sort:
@@ -267,10 +296,18 @@ def main(args):
                 if args.status and "pod" in resource:
                     command += " --field-selector=status.phase==%s" % (args.status)
 
-                t_start = time.time()
-                response = bash(command, print_stdout = False, print_stderr = False)
-                t_end = time.time()
-                times["etcd"] += t_end - t_start
+                futures[(r_idx, n_idx)] = executor.submit(bash, command, False, False)
+
+        responses = {key: future.result() for key, future in futures.items()}
+        t_end = time.time()
+        times["etcd"] += t_end - t_start
+
+        # Phase 2: render in the original (resource-major, namespace-minor) order
+        for r_idx, resource in enumerate(args.resources):
+            print(get_dashed_header(resource.upper() + ":"))
+
+            for n_idx, namespace in enumerate(args.namespaces):
+                response = responses[(r_idx, n_idx)]
 
                 print("%s%sNAMESPACE: '%s'%s" % (BOLD, BLUE, namespace, RESET))
 
@@ -285,17 +322,30 @@ def main(args):
     # %% Get nodes
 
     if args.nodes:
+        # Fetch the node list and (only in full mode) every pod concurrently. The
+        # per-namespace pod fan-out inside fetch_pods_raw() runs in the same pool and
+        # overlaps with the nodes fetch, so the wall-clock cost is roughly the single
+        # slowest request rather than the sum of them all
         t_start = time.time()
-        response = bash("kubectl get nodes -o json", print_stdout = False, print_stderr = False)
+
+        nodes_future = executor.submit(bash, "kubectl get nodes -o json", False, False, True)
+        pod_raws = fetch_pods_raw(executor) if args.nodes == "full" else None
+        nodes_raw = nodes_future.result()
+
         t_end = time.time()
         times["etcd"] += t_end - t_start
 
-        nodes = json.loads("\n".join(response))["items"]
+        nodes = _json_loads(nodes_raw)["items"]
+
+        # Parse each creation timestamp once and reuse it for both the sort key and the
+        # age column. 'fromisoformat(...).replace(tzinfo=None)' produces the same naive
+        # value as the previous strptime call but is markedly faster
+        creation_dts = [datetime.fromisoformat(node["metadata"]["creationTimestamp"]).replace(tzinfo = None) for node in nodes]
 
         if args.sort:
-            nodes_idx = np.argsort([datetime.strptime(node["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ") for node in nodes])[::-1]
+            nodes_idx = sorted(range(len(nodes)), key = lambda i: creation_dts[i])[::-1]
         else:
-            nodes_idx = np.arange(len(nodes))
+            nodes_idx = range(len(nodes))
 
         stdout = []
 
@@ -314,8 +364,13 @@ def main(args):
                     if "nvidia.com/gpu" not in capacity and "amd.com/gpu" not in capacity:
                         continue
 
+                if args.cpu_only:
+                    capacity = node["status"]["allocatable"]
+                    if "nvidia.com/gpu" in capacity or "amd.com/gpu" in capacity:
+                        continue
+
                 name = node["metadata"]["name"]
-                creation_timestamp = datetime.strptime(node["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ")
+                creation_timestamp = creation_dts[idx]
                 lapsed_seconds = int(abs((creation_timestamp - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds()))
                 age_hours = lapsed_seconds // 3600
                 age_minutes = (lapsed_seconds % 3600) // 60
@@ -333,12 +388,13 @@ def main(args):
             stdout.append("")
 
         else:
-            t_start = time.time()
-            response = bash("kubectl get pods -o json --all-namespaces", print_stdout = False, print_stderr = False)
-            t_end = time.time()
-            times["etcd"] += t_end - t_start
+            pods = []
 
-            pods = json.loads("\n".join(response))["items"]
+            for raw in pod_raws:
+                try:
+                    pods.extend(_json_loads(raw)["items"])
+                except Exception:
+                    pass
 
             for node in nodes:
                 capacity = node["status"]["allocatable"]
@@ -399,6 +455,9 @@ def main(args):
                 node = nodes[idx]
 
                 if args.gpu_only and node["utilization"]["avail"]["gpu"] == 0.0:
+                    continue
+
+                if args.cpu_only and node["utilization"]["avail"]["gpu"] > 0.0:
                     continue
 
                 name = node["metadata"]["name"]
@@ -534,23 +593,33 @@ if __name__ == "__main__":
     parser.add_argument("-tn", "--target_nodes", default = None, help = "Comma-separated list of specific nodes to query")
     parser.add_argument("-st", "--status", default = None, help = "Get pods matching 'status'")
     parser.add_argument("-go", "--gpu_only", action = "store_true", help = "Only show nodes with GPUs (use with -nd)")
-
-    t_start = time.time()
-    current_namespace = bash("kubectl config get-contexts `kubectl config current-context` --no-headers | awk '{ print $5 }'", print_stdout = False)[0]
-    if current_namespace == "":
-        current_namespace = "default"
-    t_end = time.time()
-    times["etcd"] += t_end - t_start
+    parser.add_argument("-co", "--cpu_only", action = "store_true", help = "Only show nodes without GPUs (use with -nd)")
+    parser.add_argument("-j", "--jobs", default = 16, type = int, help = "Number of concurrent kubectl workers")
 
     args = parser.parse_args()
     args.resources = args.resources.split(",") if args.resources else None
-    args.namespaces = args.namespaces.split(",") if args.namespaces else [current_namespace]
     args.labels = args.labels.split(",") if args.labels else None
     args.target_nodes = args.target_nodes.split(",") if args.target_nodes else None
+
+    # The current-context namespace is only needed as the default when '-n' is absent,
+    # so look it up lazily instead of paying for two kubectl calls on every invocation
+    if args.namespaces:
+        args.namespaces = args.namespaces.split(",")
+    else:
+        t_start = time.time()
+        current_namespace = bash("kubectl config get-contexts `kubectl config current-context` --no-headers | awk '{ print $5 }'", print_stdout = False)[0]
+        t_end = time.time()
+        times["etcd"] += t_end - t_start
+
+        if current_namespace == "":
+            current_namespace = "default"
+
+        args.namespaces = [current_namespace]
 
     if args.resources is None and args.nodes is None and args.target_nodes is None:
         parser.print_help()
     else:
-        main(args)
+        with ThreadPoolExecutor(max_workers = args.jobs) as executor:
+            main(args, executor)
 
 # %% End of program
