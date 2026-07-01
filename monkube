@@ -156,6 +156,27 @@ def get_gpu_from_string(string):
     """
     return float(string)
 
+GPU_RESOURCE_KEYS = ("nvidia.com/gpu", "amd.com/gpu")
+
+def node_is_gpu(node):
+    """
+    Classify a node as a GPU node by the *presence* of a GPU resource key in its
+    capacity or allocatable, independent of the advertised count. A GPU node whose
+    device plugin is momentarily advertising zero healthy GPUs (e.g. SageMaker
+    HyperPod health-cycling, a drain, or a device-plugin restart) still carries the
+    'nvidia.com/gpu' key with value 0; keying off the count instead would misclassify
+    such a node as CPU-only (the trap '-co' fell into in 'full' mode).
+    """
+    status = node.get("status", {})
+
+    for field in ("capacity", "allocatable"):
+        resources = status.get(field, {})
+
+        if any(key in resources for key in GPU_RESOURCE_KEYS):
+            return True
+
+    return False
+
 STATUS_COLORS = {
     "Running":            GREEN,
     "Succeeded":          GREEN,
@@ -347,11 +368,15 @@ def main(args, executor):
         else:
             nodes_idx = range(len(nodes))
 
+        if args.target_nodes:
+            target_set = set(args.target_nodes)
+            nodes_idx = [idx for idx in nodes_idx if nodes[idx]["metadata"]["name"] in target_set]
+
         stdout = []
 
         if args.nodes == "reduced":
             num_nodes = 0
-            name_width = max([len(nodes[idx]["metadata"]["name"]) for idx in nodes_idx])
+            name_width = max([len(nodes[idx]["metadata"]["name"]) for idx in nodes_idx], default = len("NAME"))
             age_width = len("%3d:%02d:%02d" % (0, 0, 0))
 
             stdout.append("%s%s%-*s  %-*s%s" % (BOLD, CYAN, name_width, "NAME", age_width, "AGE", RESET))
@@ -359,15 +384,11 @@ def main(args, executor):
             for idx in nodes_idx:
                 node = nodes[idx]
 
-                if args.gpu_only:
-                    capacity = node["status"]["allocatable"]
-                    if "nvidia.com/gpu" not in capacity and "amd.com/gpu" not in capacity:
-                        continue
+                if args.gpu_only and not node_is_gpu(node):
+                    continue
 
-                if args.cpu_only:
-                    capacity = node["status"]["allocatable"]
-                    if "nvidia.com/gpu" in capacity or "amd.com/gpu" in capacity:
-                        continue
+                if args.cpu_only and node_is_gpu(node):
+                    continue
 
                 name = node["metadata"]["name"]
                 creation_timestamp = creation_dts[idx]
@@ -454,10 +475,10 @@ def main(args, executor):
             for idx in nodes_idx:
                 node = nodes[idx]
 
-                if args.gpu_only and node["utilization"]["avail"]["gpu"] == 0.0:
+                if args.gpu_only and not node_is_gpu(node):
                     continue
 
-                if args.cpu_only and node["utilization"]["avail"]["gpu"] > 0.0:
+                if args.cpu_only and node_is_gpu(node):
                     continue
 
                 name = node["metadata"]["name"]
@@ -488,7 +509,7 @@ def main(args, executor):
         print(get_dashed_header("CLUSTER NODES:"))
         print("\n".join(stdout))
 
-    if args.target_nodes:
+    if args.target_nodes and not args.nodes:
         t_start = time.time()
         response = bash("kubectl describe nodes --selector='kubernetes.io/hostname in (%s)'" % (", ".join(args.target_nodes)), print_stdout = False, print_stderr = False)
         t_end = time.time()
@@ -590,7 +611,7 @@ if __name__ == "__main__":
     parser.add_argument("-t", "--labels", default = None, help = "Get subset of resources matching the specified comma-separated list of labels. Use '|' to specify multiple matches for a given key. EXAMPLE: \"--labels key-1=value-1,key-2='value-2|value-3'\"")
     parser.add_argument("-nd", "--nodes", default = None, choices = ["full", "reduced"], help = "Show allocation and utilization of nodes")
     parser.add_argument("-ln", "--num_nodes", default = None, help = "Show data for the first 'num_nodes'")
-    parser.add_argument("-tn", "--target_nodes", default = None, help = "Comma-separated list of specific nodes to query")
+    parser.add_argument("-tn", "--target_nodes", default = None, help = "Comma-separated list of specific nodes to query. When combined with '-nd', filters the node output to just these nodes")
     parser.add_argument("-st", "--status", default = None, help = "Get pods matching 'status'")
     parser.add_argument("-go", "--gpu_only", action = "store_true", help = "Only show nodes with GPUs (use with -nd)")
     parser.add_argument("-co", "--cpu_only", action = "store_true", help = "Only show nodes without GPUs (use with -nd)")
