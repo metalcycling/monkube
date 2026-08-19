@@ -1,106 +1,117 @@
-# Monkube: Monitoring Kubernetes
+# Monkube
 
-This command-line utility lets you monitor different resources in different namespaces with ease
+A point-in-time view of what a Kubernetes cluster is running and where there is room left
+to run more. One invocation replaces a handful of `kubectl get` / `kubectl describe` calls,
+issues them concurrently, and prints the results colorized.
 
-**SUGGESTION**: To make it easier to work with `monkube`, make the utility an executable (e.g., `$ chmod u+x monkube`) and add it to your `$PATH`.
+There are two independent views, usable separately or together:
+
+- `-r/--resources` — `kubectl get` tables for any set of resources across any set of
+  namespaces, with sorting, label filtering and line caps.
+- `-nd/--nodes` — per-node cpu / gpu / memory allocation, plus the reasons a node cannot
+  accept more work.
+
+## Install
+
+A single script; it needs `kubectl` on your `$PATH` and an active context.
+
+```bash
+chmod u+x monkube    # then drop it somewhere on your $PATH
+pip install orjson   # optional, faster JSON parsing
+```
 
 ## Usage
 
-Check the `help` option of Monkube to find the list of options
-
 ```bash
-$ monkube --help
-usage: Monkube [-h] [-r RESOURCES] [-n NAMESPACES] [-l NUM_LINES] [-s] [-t LABELS] [-nd {full,reduced}] [-ln NUM_NODES] [-tn TARGET_NODES] [-st STATUS] [-go] [-j JOBS]
+# Pods and services in two namespaces, 5 lines each
+monkube -r pods,services -n default,kube-system -l 5
 
-Monitoring of kubernetes resources
+# Newest pods first, restricted by label, only those still Pending
+monkube -r pods -s -t "app=trainer" -st Pending
 
-options:
-  -h, --help            show this help message and exit
-  -r RESOURCES, --resources RESOURCES
-                        Comma-separated list of resources to be monitored
-  -n NAMESPACES, --namespaces NAMESPACES
-                        Comma-separated list of namespaces to be monitored
-  -l NUM_LINES, --num_lines NUM_LINES
-                        Number of lines to print for each resource
-  -s, --sort            Sort resources starting with the most recently used
-  -t LABELS, --labels LABELS
-                        Get subset of resources matching the specified comma-separated list of labels. Use '|' to specify multiple matches for a given key. EXAMPLE: "--labels key-1=value-1,key-2='value-2|value-3'"
-  -nd {full,reduced}, --nodes {full,reduced}
-                        Show allocation and utilization of nodes
-  -ln NUM_NODES, --num_nodes NUM_NODES
-                        Show data for the first 'num_nodes'
-  -tn TARGET_NODES, --target_nodes TARGET_NODES
-                        Comma-separated list of specific nodes to query
-  -st STATUS, --status STATUS
-                        Get pods matching 'status'
-  -go, --gpu_only       Only show nodes with GPUs (use with -nd)
-  -j JOBS, --jobs JOBS  Number of concurrent kubectl workers (default: 16)
+# Allocation for every GPU node
+monkube -nd full -go
+
+# Names, ages and status only
+monkube -nd reduced
+
+# Two specific nodes
+monkube -tn worker-01,worker-02
 ```
+
+Without `-n`, the current context's namespace is used (or `default` if it has none).
+Given none of `-r`, `-nd` or `-tn`, the help text is printed.
+
+## Options
+
+| Flag | Description |
+| --- | --- |
+| `-r`, `--resources` | Comma-separated resources to list (`pods,services,…`) |
+| `-n`, `--namespaces` | Comma-separated namespaces; defaults to the current context's |
+| `-l`, `--num_lines` | Cap the lines printed per resource |
+| `-s`, `--sort` | Newest first, by creation timestamp |
+| `-t`, `--labels` | Label selector, e.g. `k1=v1,k2='v2\|v3'` (`\|` matches any of) |
+| `-st`, `--status` | Keep only pods in this phase; ignored for non-pod resources |
+| `-nd`, `--nodes` | Node view: `full` (allocation) or `reduced` (name / age / status) |
+| `-go`, `--gpu_only` | Only nodes advertising a GPU resource |
+| `-co`, `--cpu_only` | Only nodes that do not |
+| `-ln`, `--num_nodes` | Cap the number of nodes printed |
+| `-tn`, `--target_nodes` | Restrict to these nodes; without `-nd`, queries just them |
+| `-j`, `--jobs` | Concurrent `kubectl` workers (default 16) |
+
+## Reading the node view
+
+`-nd full` reports `requested / allocatable (percent)` per node:
+
+```
+NAME: worker-01
+    cpu:  38348.00 / 223800.00 ( 17.13%)
+    gpu:      7.00 /      8.00 ( 87.50%)
+    mem:   1083.63 /   1999.55 ( 54.19%)
+```
+
+- **Requested, not consumed.** The numerator sums the resource *requests* of the
+  containers of every `Running` or `Pending` pod on the node. It answers "what will the
+  scheduler still fit here?", not "how busy is this hardware?" — a process pinning a GPU
+  at 100% without requesting it contributes nothing.
+- **Units.** cpu in millicores, memory in Gi, gpu in devices, keeping fractional values.
+  Both `nvidia.com/gpu` and `amd.com/gpu` are recognized, and a node counts as a GPU node
+  when it advertises either key at all, even at zero.
+
+Idle is not the same as available, so nodes are annotated with whatever blocks them:
+
+| Marker | Meaning |
+| --- | --- |
+| `[cordoned]` | `spec.unschedulable` is set; the redundant cordon taint is not repeated |
+| `[NotReady]`, `[Ready=Unknown]` | The node's `Ready` condition |
+| `[key=value:Effect]` | One per `NoSchedule` / `NoExecute` taint; `PreferNoSchedule` is omitted, as it does not block |
+| `[N unhealthy]` | GPUs the node reports but that cannot be scheduled onto |
+
+That last marker exists because kubelet publishes device-plugin resources with capacity =
+every device the plugin reported and allocatable = only those it currently considers
+healthy. A node whose plugin has withdrawn GPUs therefore reports a *smaller but idle* GPU
+count, which is otherwise indistinguishable from a healthy node of that size:
+
+```
+NAME: worker-02  [cordoned]
+    gpu:      0.00 /      8.00 (  0.00%)
+
+NAME: worker-03
+    gpu:      0.00 /      4.00 (  0.00%)  [4 unhealthy]
+```
+
+Neither node can take an 8-GPU pod, though both look free without the markers.
+`-nd reduced` carries the same annotations in a `STATUS` column.
 
 ## Performance
 
-`monkube` issues independent `kubectl` queries concurrently and parses their JSON
-with [`orjson`](https://github.com/ijl/orjson):
+Independent `kubectl` queries run concurrently on a shared thread pool sized by
+`-j/--jobs`, and JSON is handed to [`orjson`](https://github.com/ijl/orjson) as raw bytes.
+`orjson` is optional — without it the standard-library `json` module is used instead.
 
-- In `--nodes full` mode the cluster-wide pod listing is fetched **one request per
-  namespace in parallel** rather than as a single `--all-namespaces` call. The
-  apiserver/proxy is bound by per-stream throughput, so this is several times faster
-  on large clusters (measured ~19s → ~6s on a 253-node / 9300-pod cluster).
-- Per-`(resource, namespace)` table queries and the nodes/pods fetches run on a shared
-  thread pool; use `-j/--jobs` to tune the worker count.
-- JSON payloads are handed to `orjson` as raw bytes (no intermediate decode/rejoin).
-  `orjson` is optional — if it is not installed the tool transparently falls back to
-  the standard-library `json` module. Install it with `pip install orjson`.
+The one non-obvious trick is in `-nd full`, which needs every pod in the cluster: it issues
+one request per namespace in parallel rather than a single `--all-namespaces` call. The
+apiserver is bound by per-stream throughput, so splitting the stream is several times
+faster on a large cluster (~19s → ~6s at 253 nodes / 9300 pods).
 
-## Example
-
-Here is an example of how to use the utility
-
-```bash
-$ monkube --resources pods,services --namespaces default,kube-system --num_lines 5 --nodes full --num_nodes 3
-------------------------------------- PODS: ------------------------------------
-
-NAMESPACE: 'default'
-No resources found in default namespace.
-
-NAMESPACE: 'kube-system'
-NAME                                                 READY   STATUS    RESTARTS      AGE
-event-exporter-gke-5b8bcb44f7-rfc78                  2/2     Running   0             24d
-filestore-node-4lvts                                 3/3     Running   0             7h
-filestore-node-4njxs                                 3/3     Running   0             15d
-filestore-node-6gzt2                                 3/3     Running   0             20d
-filestore-node-8xqzh                                 3/3     Running   0             26d
-
------------------------------------ SERVICES: ----------------------------------
-
-NAMESPACE: 'default'
-NAME         TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
-kubernetes   ClusterIP   10.56.0.1    <none>        443/TCP   134d
-
-NAMESPACE: 'kube-system'
-NAME             TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)         AGE
-kube-dns         ClusterIP   10.56.0.10    <none>        53/UDP,53/TCP   134d
-metrics-server   ClusterIP   10.56.10.80   <none>        443/TCP         134d
-
--------------------------------- CLUSTER NODES: --------------------------------
-
-NAME: gke-vantroid-default-pool-06aeef3b-46q9
-    cpu:   911.00 /   940.00 ( 96.91%)
-    gpu:     0.00 /     0.00 (  0.00%)
-    mem:     1.33 /     2.84 ( 46.90%)
-
-NAME: gke-vantroid-default-pool-06aeef3b-6748
-    cpu:   893.00 /   940.00 ( 95.00%)
-    gpu:     0.00 /     0.00 (  0.00%)
-    mem:     1.21 /     2.84 ( 42.56%)
-
-NAME: gke-vantroid-default-pool-06aeef3b-bgbz
-    cpu:   891.00 /   940.00 ( 94.79%)
-    gpu:     0.00 /     0.00 (  0.00%)
-    mem:     1.12 /     2.84 ( 39.56%)
-
---------------------------------------------------------------------------------
-
-   ETCD time: 1.59 s
-Parsing time: 0.01 s
-```
+Each run closes with the time spent querying the cluster versus parsing the responses.

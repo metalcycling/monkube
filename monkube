@@ -177,6 +177,86 @@ def node_is_gpu(node):
 
     return False
 
+def get_gpu_capacity_deficit(node):
+    """
+    Number of GPUs the node physically reports but that cannot be scheduled onto.
+
+    Kubelet advertises device-plugin resources with capacity = every device the plugin
+    reported and allocatable = only those it currently considers healthy, so a nonzero
+    difference is the count of GPUs the plugin has taken out of service (e.g. after a
+    critical Xid). Percentages below are denominated at allocatable -- the honest ceiling
+    for scheduling -- which on its own leaves a node with dead GPUs indistinguishable
+    from a smaller idle node, so the deficit is reported right next to it.
+    """
+    status = node.get("status", {})
+    capacity = status.get("capacity", {})
+    allocatable = status.get("allocatable", {})
+
+    for key in GPU_RESOURCE_KEYS:
+        if key in capacity and key in allocatable:
+            return get_gpu_from_string(capacity[key]) - get_gpu_from_string(allocatable[key])
+
+    return 0.0
+
+BLOCKING_TAINT_EFFECTS = ("NoSchedule", "NoExecute")
+
+def get_node_status_markers(node):
+    """
+    Reasons a node cannot accept a new pod, as a list of '(text, color)' pairs.
+
+    Allocation percentages alone cannot answer 'is this node available?': a cordoned,
+    tainted or NotReady node reports idle cpu/gpu/mem that nothing can actually land on,
+    so without these markers it reads as free capacity.
+    """
+    spec = node.get("spec", {})
+    status = node.get("status", {})
+    markers = []
+
+    ready = None
+
+    for condition in status.get("conditions", []):
+        if condition.get("type") == "Ready":
+            ready = condition.get("status")
+
+    if ready == "False":
+        markers.append(("NotReady", RED))
+
+    elif ready != "True":
+        markers.append(("Ready=Unknown", RED))
+
+    if spec.get("unschedulable"):
+        markers.append(("cordoned", RED))
+
+    for taint in spec.get("taints") or []:
+        effect = taint.get("effect", "")
+
+        if effect not in BLOCKING_TAINT_EFFECTS:
+            continue
+
+        key = taint.get("key", "")
+
+        # 'kubectl cordon' sets both 'spec.unschedulable' and this taint, so reporting
+        # the taint as well would state the same thing twice
+        if key == "node.kubernetes.io/unschedulable":
+            continue
+
+        value = taint.get("value")
+        markers.append(("%s%s:%s" % (key, "=" + value if value else "", effect), YELLOW))
+
+    return markers
+
+def format_status_markers(markers):
+    """
+    Render '(text, color)' status markers as a bracketed, colorized string
+    """
+    return " ".join(["%s[%s]%s" % (color, text, RESET) for text, color in markers])
+
+def format_gpu_deficit(deficit):
+    """
+    Render an unhealthy-GPU count as a suffix for the 'gpu' allocation line
+    """
+    return "  %s[%g unhealthy]%s" % (RED, deficit, RESET) if deficit > 0.0 else ""
+
 STATUS_COLORS = {
     "Running":            GREEN,
     "Succeeded":          GREEN,
@@ -379,7 +459,7 @@ def main(args, executor):
             name_width = max([len(nodes[idx]["metadata"]["name"]) for idx in nodes_idx], default = len("NAME"))
             age_width = len("%3d:%02d:%02d" % (0, 0, 0))
 
-            stdout.append("%s%s%-*s  %-*s%s" % (BOLD, CYAN, name_width, "NAME", age_width, "AGE", RESET))
+            stdout.append("%s%s%-*s  %-*s  %s%s" % (BOLD, CYAN, name_width, "NAME", age_width, "AGE", "STATUS", RESET))
 
             for idx in nodes_idx:
                 node = nodes[idx]
@@ -398,8 +478,16 @@ def main(args, executor):
                 age_seconds = (lapsed_seconds % 3600) % 60
                 age = "%3d:%02d:%02d" % (age_hours, age_minutes, age_seconds)
 
+                markers = get_node_status_markers(node)
+                gpu_deficit = get_gpu_capacity_deficit(node)
+
+                if gpu_deficit > 0.0:
+                    markers.append(("%g GPUs unhealthy" % (gpu_deficit), RED))
+
+                status = format_status_markers(markers)
+
                 stdout.append("")
-                stdout[-1] += "%-*s  %-*s" % (name_width, name, age_width, age)
+                stdout[-1] += "%-*s  %-*s%s" % (name_width, name, age_width, age, "  " + status if status else "")
                 num_nodes += 1
 
                 if args.num_nodes:
@@ -495,10 +583,13 @@ def main(args, executor):
                 gpu_percent = gpu_alloc / gpu_avail * 100.0 if gpu_avail > 0.0 else 0.0
                 mem_percent = mem_alloc / mem_avail * 100.0 if mem_avail > 0.0 else 0.0
 
+                status = format_status_markers(get_node_status_markers(node))
+                gpu_note = format_gpu_deficit(get_gpu_capacity_deficit(node))
+
                 stdout.append("")
-                stdout[-1] += "%s%sNAME: %s%s\n" % (BOLD, WHITE, name, RESET)
+                stdout[-1] += "%s%sNAME: %s%s%s\n" % (BOLD, WHITE, name, RESET, "  " + status if status else "")
                 stdout[-1] += "    %scpu%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, cpu_alloc, RESET, DIM, RESET, BLUE, cpu_avail, RESET, colorize_percentage(cpu_percent), cpu_percent, RESET)
-                stdout[-1] += "    %sgpu%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, gpu_alloc, RESET, DIM, RESET, BLUE, gpu_avail, RESET, colorize_percentage(gpu_percent), gpu_percent, RESET)
+                stdout[-1] += "    %sgpu%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)%s\n" % (WHITE, RESET, BLUE, gpu_alloc, RESET, DIM, RESET, BLUE, gpu_avail, RESET, colorize_percentage(gpu_percent), gpu_percent, RESET, gpu_note)
                 stdout[-1] += "    %smem%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, mem_alloc, RESET, DIM, RESET, BLUE, mem_avail, RESET, colorize_percentage(mem_percent), mem_percent, RESET)
                 num_nodes += 1
 
@@ -511,7 +602,20 @@ def main(args, executor):
 
     if args.target_nodes and not args.nodes:
         t_start = time.time()
-        response = bash("kubectl describe nodes --selector='kubernetes.io/hostname in (%s)'" % (", ".join(args.target_nodes)), print_stdout = False, print_stderr = False)
+        selector = "kubernetes.io/hostname in (%s)" % (", ".join(args.target_nodes))
+        nodes_future = executor.submit(bash, "kubectl get nodes -o json --selector='%s'" % (selector), False, False, True)
+        response = bash("kubectl describe nodes --selector='%s'" % (selector), print_stdout = False, print_stderr = False)
+
+        node_markers = {}
+        node_gpu_deficits = {}
+
+        try:
+            for node in _json_loads(nodes_future.result())["items"]:
+                node_markers[node["metadata"]["name"]] = get_node_status_markers(node)
+                node_gpu_deficits[node["metadata"]["name"]] = get_gpu_capacity_deficit(node)
+        except Exception:
+            pass
+
         t_end = time.time()
         times["etcd"] += t_end - t_start
 
@@ -571,11 +675,14 @@ def main(args, executor):
                 gpu_percent = gpu_alloc / gpu_avail * 100.0 if gpu_avail > 0.0 else 0.0
                 mem_percent = mem_alloc / mem_avail * 100.0 if mem_avail > 0.0 else 0.0
 
+                status = format_status_markers(node_markers.get(name, []))
+                gpu_note = format_gpu_deficit(node_gpu_deficits.get(name, 0.0))
+
                 stdout.append("")
-                stdout[-1] += "%s%sNAME: %s%s\n" % (BOLD, WHITE, name, RESET)
+                stdout[-1] += "%s%sNAME: %s%s%s\n" % (BOLD, WHITE, name, RESET, "  " + status if status else "")
 
                 stdout[-1] += "    %scpu%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, cpu_alloc, RESET, DIM, RESET, BLUE, cpu_avail, RESET, colorize_percentage(cpu_percent), cpu_percent, RESET)
-                stdout[-1] += "    %sgpu%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, gpu_alloc, RESET, DIM, RESET, BLUE, gpu_avail, RESET, colorize_percentage(gpu_percent), gpu_percent, RESET)
+                stdout[-1] += "    %sgpu%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)%s\n" % (WHITE, RESET, BLUE, gpu_alloc, RESET, DIM, RESET, BLUE, gpu_avail, RESET, colorize_percentage(gpu_percent), gpu_percent, RESET, gpu_note)
                 stdout[-1] += "    %smem%s: %s%9.2f%s %s/%s %s%9.2f%s (%s%6.2f%%%s)\n" % (WHITE, RESET, BLUE, mem_alloc, RESET, DIM, RESET, BLUE, mem_avail, RESET, colorize_percentage(mem_percent), mem_percent, RESET)
 
                 node_id += 1
