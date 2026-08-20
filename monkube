@@ -257,6 +257,13 @@ def format_gpu_deficit(deficit):
     """
     return "  %s[%g unhealthy]%s" % (RED, deficit, RESET) if deficit > 0.0 else ""
 
+def node_needs_attention(node):
+    """
+    Whether a node is worth looking at: it cannot accept new pods (cordoned, tainted,
+    NotReady) or its device plugin has withdrawn GPUs the node still reports as capacity
+    """
+    return bool(get_node_status_markers(node)) or get_gpu_capacity_deficit(node) > 0.0
+
 STATUS_COLORS = {
     "Running":            GREEN,
     "Succeeded":          GREEN,
@@ -470,6 +477,9 @@ def main(args, executor):
                 if args.cpu_only and node_is_gpu(node):
                     continue
 
+                if args.unhealthy_only and not node_needs_attention(node):
+                    continue
+
                 name = node["metadata"]["name"]
                 creation_timestamp = creation_dts[idx]
                 lapsed_seconds = int(abs((creation_timestamp - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds()))
@@ -567,6 +577,9 @@ def main(args, executor):
                     continue
 
                 if args.cpu_only and node_is_gpu(node):
+                    continue
+
+                if args.unhealthy_only and not node_needs_attention(node):
                     continue
 
                 name = node["metadata"]["name"]
@@ -722,6 +735,7 @@ if __name__ == "__main__":
     parser.add_argument("-st", "--status", default = None, help = "Get pods matching 'status'")
     parser.add_argument("-go", "--gpu_only", action = "store_true", help = "Only show nodes with GPUs (use with -nd)")
     parser.add_argument("-co", "--cpu_only", action = "store_true", help = "Only show nodes without GPUs (use with -nd)")
+    parser.add_argument("-uo", "--unhealthy_only", action = "store_true", help = "Only show nodes that cannot take new pods (cordoned, tainted, NotReady) or that report unhealthy GPUs (use with -nd)")
     parser.add_argument("-j", "--jobs", default = 16, type = int, help = "Number of concurrent kubectl workers")
 
     args = parser.parse_args()

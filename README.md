@@ -35,6 +35,9 @@ monkube -nd full -go
 # Names, ages and status only
 monkube -nd reduced
 
+# Just the nodes something is wrong with
+monkube -nd reduced -uo
+
 # Two specific nodes
 monkube -tn worker-01,worker-02
 ```
@@ -55,6 +58,7 @@ Given none of `-r`, `-nd` or `-tn`, the help text is printed.
 | `-nd`, `--nodes` | Node view: `full` (allocation) or `reduced` (name / age / status) |
 | `-go`, `--gpu_only` | Only nodes advertising a GPU resource |
 | `-co`, `--cpu_only` | Only nodes that do not |
+| `-uo`, `--unhealthy_only` | Only nodes carrying a marker below: cordoned, blocking taint, not `Ready`, or unhealthy GPUs |
 | `-ln`, `--num_nodes` | Cap the number of nodes printed |
 | `-tn`, `--target_nodes` | Restrict to these nodes; without `-nd`, queries just them |
 | `-j`, `--jobs` | Concurrent `kubectl` workers (default 16) |
@@ -101,7 +105,8 @@ NAME: worker-03
 ```
 
 Neither node can take an 8-GPU pod, though both look free without the markers.
-`-nd reduced` carries the same annotations in a `STATUS` column.
+`-nd reduced` carries the same annotations in a `STATUS` column, and `-uo/--unhealthy_only`
+drops every node that carries no marker at all, leaving just the ones to look into.
 
 ## Performance
 
