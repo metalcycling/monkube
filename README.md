@@ -13,7 +13,8 @@ There are two independent views, usable separately or together:
 
 ## Install
 
-A single script; it needs `kubectl` on your `$PATH` and an active context.
+A single script; it needs `kubectl` on your `$PATH` and a context to talk to (the current
+one, or any other via `-c/--context`).
 
 ```bash
 chmod u+x monkube    # then drop it somewhere on your $PATH
@@ -40,9 +41,16 @@ monkube -nd reduced -uo
 
 # Two specific nodes
 monkube -tn worker-01,worker-02
+
+# Any of the above against another cluster, without switching contexts
+monkube -c staging-cluster -nd reduced -uo
 ```
 
-Without `-n`, the current context's namespace is used (or `default` if it has none).
+Without `-c`, the current context is used; `-c` applies to every query the run makes and
+leaves `kubectl config current-context` untouched, so two terminals can watch two clusters.
+An unknown context is rejected up front, listing the ones that exist.
+
+Without `-n`, the namespace of the context in effect is used (or `default` if it has none).
 Given none of `-r`, `-nd` or `-tn`, the help text is printed.
 
 ## Options
@@ -50,7 +58,7 @@ Given none of `-r`, `-nd` or `-tn`, the help text is printed.
 | Flag | Description |
 | --- | --- |
 | `-r`, `--resources` | Comma-separated resources to list (`pods,services,…`) |
-| `-n`, `--namespaces` | Comma-separated namespaces; defaults to the current context's |
+| `-n`, `--namespaces` | Comma-separated namespaces; defaults to that of the context in effect |
 | `-l`, `--num_lines` | Cap the lines printed per resource |
 | `-s`, `--sort` | Newest first, by creation timestamp |
 | `-t`, `--labels` | Label selector, e.g. `k1=v1,k2='v2\|v3'` (`\|` matches any of) |
@@ -61,6 +69,7 @@ Given none of `-r`, `-nd` or `-tn`, the help text is printed.
 | `-uo`, `--unhealthy_only` | Only nodes carrying a marker below: cordoned, blocking taint, not `Ready`, or unhealthy GPUs |
 | `-ln`, `--num_nodes` | Cap the number of nodes printed |
 | `-tn`, `--target_nodes` | Restrict to these nodes; without `-nd`, queries just them |
+| `-c`, `--context` | Kubeconfig context to query; defaults to the current one |
 | `-j`, `--jobs` | Concurrent `kubectl` workers (default 16) |
 
 ## Reading the node view

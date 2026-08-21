@@ -8,6 +8,7 @@ Monkube: Kuberneters cluster monitoring utility
 
 import math
 import time
+import shlex
 import argparse
 import subprocess
 
@@ -26,6 +27,13 @@ except ImportError:
 
     def _json_loads(data):
         return json.loads(data)
+
+# %% Kubectl invocation
+
+# Every kubectl command in this script is built from this prefix, so pointing the whole
+# run at a different cluster is a matter of rewriting it once (see '--context' below)
+# instead of threading the flag through each call site
+KUBECTL = "kubectl"
 
 # %% ANSI color codes
 
@@ -360,10 +368,10 @@ def fetch_pods_raw(executor):
     bound by per-stream throughput rather than aggregate bandwidth. Returns a list
     of raw JSON byte payloads (one per namespace) to be parsed by the caller.
     """
-    namespaces_raw = bash("kubectl get namespaces -o json", print_stdout = False, print_stderr = False, as_bytes = True)
+    namespaces_raw = bash("%s get namespaces -o json" % (KUBECTL), print_stdout = False, print_stderr = False, as_bytes = True)
     namespaces = [item["metadata"]["name"] for item in _json_loads(namespaces_raw)["items"]]
 
-    futures = [executor.submit(bash, "kubectl get pods -n %s -o json" % (namespace), False, False, True) for namespace in namespaces]
+    futures = [executor.submit(bash, "%s get pods -n %s -o json" % (KUBECTL, namespace), False, False, True) for namespace in namespaces]
 
     return [future.result() for future in futures]
 
@@ -383,7 +391,7 @@ def main(args, executor):
 
         for r_idx, resource in enumerate(args.resources):
             for n_idx, namespace in enumerate(args.namespaces):
-                command = "kubectl -n %s get %s" % (namespace, resource)
+                command = "%s -n %s get %s" % (KUBECTL, namespace, resource)
 
                 if args.sort:
                     command += " --sort-by=.metadata.creationTimestamp"
@@ -436,7 +444,7 @@ def main(args, executor):
         # slowest request rather than the sum of them all
         t_start = time.time()
 
-        nodes_future = executor.submit(bash, "kubectl get nodes -o json", False, False, True)
+        nodes_future = executor.submit(bash, "%s get nodes -o json" % (KUBECTL), False, False, True)
         pod_raws = fetch_pods_raw(executor) if args.nodes == "full" else None
         nodes_raw = nodes_future.result()
 
@@ -616,8 +624,8 @@ def main(args, executor):
     if args.target_nodes and not args.nodes:
         t_start = time.time()
         selector = "kubernetes.io/hostname in (%s)" % (", ".join(args.target_nodes))
-        nodes_future = executor.submit(bash, "kubectl get nodes -o json --selector='%s'" % (selector), False, False, True)
-        response = bash("kubectl describe nodes --selector='%s'" % (selector), print_stdout = False, print_stderr = False)
+        nodes_future = executor.submit(bash, "%s get nodes -o json --selector='%s'" % (KUBECTL, selector), False, False, True)
+        response = bash("%s describe nodes --selector='%s'" % (KUBECTL, selector), print_stdout = False, print_stderr = False)
 
         node_markers = {}
         node_gpu_deficits = {}
@@ -736,9 +744,23 @@ if __name__ == "__main__":
     parser.add_argument("-go", "--gpu_only", action = "store_true", help = "Only show nodes with GPUs (use with -nd)")
     parser.add_argument("-co", "--cpu_only", action = "store_true", help = "Only show nodes without GPUs (use with -nd)")
     parser.add_argument("-uo", "--unhealthy_only", action = "store_true", help = "Only show nodes that cannot take new pods (cordoned, tainted, NotReady) or that report unhealthy GPUs (use with -nd)")
+    parser.add_argument("-c", "--context", default = None, help = "Kubeconfig context to query; defaults to the current context")
     parser.add_argument("-j", "--jobs", default = 16, type = int, help = "Number of concurrent kubectl workers")
 
     args = parser.parse_args()
+
+    # Resolve the target cluster first: every later query is built from 'KUBECTL'. An
+    # unknown context is rejected up front because most calls suppress stderr, so kubectl's
+    # own complaint would otherwise be swallowed and reported as an empty cluster
+    if args.context:
+        contexts = bash("kubectl config get-contexts -o name", print_stdout = False, print_stderr = False)
+
+        if args.context not in contexts:
+            available = "\n".join("  " + name for name in contexts) if contexts else "  (none)"
+            parser.error("context '%s' not found in kubeconfig. Available contexts:\n%s" % (args.context, available))
+
+        KUBECTL = "kubectl --context=%s" % (shlex.quote(args.context))
+
     args.resources = args.resources.split(",") if args.resources else None
     args.labels = args.labels.split(",") if args.labels else None
     args.target_nodes = args.target_nodes.split(",") if args.target_nodes else None
@@ -749,7 +771,13 @@ if __name__ == "__main__":
         args.namespaces = args.namespaces.split(",")
     else:
         t_start = time.time()
-        current_namespace = bash("kubectl config get-contexts `kubectl config current-context` --no-headers | awk '{ print $5 }'", print_stdout = False)[0]
+
+        # 'get-contexts' only prints the leading '*' column for the current context, so
+        # the namespace lands in a different field for any other one. Reading it out of
+        # the kubeconfig instead is column-independent and works for both cases
+        response = bash("%s config view --minify --output 'jsonpath={..namespace}'" % (KUBECTL), print_stdout = False)
+        current_namespace = response[0].strip() if response else ""
+
         t_end = time.time()
         times["etcd"] += t_end - t_start
 
